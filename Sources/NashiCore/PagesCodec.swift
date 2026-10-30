@@ -289,7 +289,10 @@ private enum PagesDOCXReader {
         }
         func image(_ element: XMLElement) throws -> [String:Any]? {
             let id = element.descendants("blip").first?.attr("embed") ?? element.descendants("imagedata").first?.attr("id")
-            guard let id, let target=relationships[id],let file=localPath(target),let data=try? Data(contentsOf:file), data.count <= 100_000_000 else { return nil }
+            guard let id,let target=relationships[id],let file=localPath(target),
+                  let values=try? file.resourceValues(forKeys:[.fileSizeKey,.isRegularFileKey]),
+                  values.isRegularFile==true,(values.fileSize ?? Int.max)<=100_000_000,
+                  let data=try? Data(contentsOf:file) else { return nil }
             var result: [String:Any] = ["type":"image","data":data.base64EncodedString(),"fileName":file.lastPathComponent]
             if let extent=element.descendants("extent").first { if let w=extent.number("cx") { result["width"]=w/12700 };if let h=extent.number("cy") {result["height"]=h/12700} }
             if let alt=element.descendants("docPr").first?.attr("descr") {result["alt"]=alt}
