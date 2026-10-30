@@ -46,3 +46,21 @@ test('stereo keeps independent output channel gains', async () => {
   assert.ok(Math.abs(pcm[0]) < 0.001);
   assert.ok(Math.abs(pcm[1] + 0.2) < 0.001);
 });
+
+const timeImplementation = source.split(/\r?\n/).find(line => line.startsWith('function time(v){'));
+assert.ok(timeImplementation, 'media time formatter was not found');
+const formatTime = runInNewContext(timeImplementation + '\ntime', {});
+
+test('rounded seconds carry into the next minute', () => {
+  assert.equal(formatTime(59.9996), '01:00.000');
+  assert.equal(formatTime(119.9996), '02:00.000');
+  assert.equal(formatTime(3599.9996), '60:00.000');
+});
+
+test('media time preserves ordinary millisecond precision and invalid-value handling', () => {
+  assert.equal(formatTime(59.9994), '00:59.999');
+  assert.equal(formatTime(60), '01:00.000');
+  assert.equal(formatTime(0.001), '00:00.001');
+  assert.equal(formatTime(-1), '—');
+  assert.equal(formatTime(Infinity), '—');
+});
