@@ -80,6 +80,21 @@ public sealed class MediaEngine(string ffmpeg, string ffprobe)
         return new(duration, new FileInfo(input).Length, streams);
     }
 
+    // The last video packet's time from the container start, read without decoding: the final minute first, then the whole file.
+    private async Task<double?> LastVideoTimestampAsync(string input,double duration,CancellationToken token)
+    {
+        foreach(var interval in duration>60?new[]{Number(duration-60)+"%",null}:[null])
+        {
+            var result=await ProcessRunner.RunAsync(ffprobe,["-v","error","-select_streams","v:0",..(interval is null?Array.Empty<string>():["-read_intervals",interval]),"-show_entries","packet=pts_time,dts_time:format=start_time","-of","json=c=1",input],token);
+            using var json=JsonDocument.Parse(result.Output);double? last=null;
+            // B-frames in AVI leave many packets without a PTS; their DTS still places them.
+            if(json.RootElement.TryGetProperty("packets",out var packets))foreach(var packet in packets.EnumerateArray())if((double.TryParse(GetString(packet,"pts_time"),NumberStyles.Float,CultureInfo.InvariantCulture,out var time)||double.TryParse(GetString(packet,"dts_time"),NumberStyles.Float,CultureInfo.InvariantCulture,out time))&&double.IsFinite(time)&&(last is null||time>last))last=time;
+            if(last is null)continue;
+            // Input -ss counts from the container's start time.
+            return last-(json.RootElement.TryGetProperty("format",out var format)&&double.TryParse(GetString(format,"start_time"),NumberStyles.Float,CultureInfo.InvariantCulture,out var start)&&double.IsFinite(start)?start:0);
+        }
+        return null;
+    }
     private static double ParseFrameRate(string value){var parts=value.Split('/');if(parts.Length==2&&double.TryParse(parts[0],CultureInfo.InvariantCulture,out var numerator)&&double.TryParse(parts[1],CultureInfo.InvariantCulture,out var denominator)&&denominator>0&&double.IsFinite(numerator/denominator)&&numerator/denominator>=1)return numerator/denominator;return 30;}
 
     public async Task<IReadOnlyList<string>> ConvertAsync(IReadOnlyList<string> inputs, string format, string destination,
@@ -102,7 +117,7 @@ public sealed class MediaEngine(string ffmpeg, string ffprobe)
                 else
                 {
                     arguments.AddRange(["-map","0:v:0","-map","0:a:0?"]);
-                    if (options.Width is not null || options.Height is not null) arguments.AddRange(["-vf",Scale(options)]);
+                    arguments.AddRange(["-vf",options.Width is not null || options.Height is not null?Scale(options):"pad=ceil(iw/2)*2:ceil(ih/2)*2"]);
                     arguments.AddRange(VideoEncoding(format,options));
                 }
             }
@@ -181,12 +196,20 @@ public sealed class MediaEngine(string ffmpeg, string ffprobe)
             case "normalizeAudio":return [await NormalizeAsync(input,info,directory,ext,options,progress,token)];
             case "compress":return [await CompressAsync(input,info,directory,options,progress,token)];
             case "videoSnapshots":
-                RequireVideo(info);if(options.SnapshotTimes.Length==0)throw new ArgumentException("Choose at least one frame.");var frames=new List<string>();
+                RequireVideo(info);if(options.SnapshotTimes.Length==0)throw new ArgumentException("Choose at least one frame.");var frames=new List<string>();double? lastVideo=null;var lastVideoRead=false;
                 for(var n=0;n<options.SnapshotTimes.Length;n++)
                 {
-                    var time=options.SnapshotTimes[n];if(!double.IsFinite(time)||time<0||(info.Duration>0&&time>=info.Duration))throw new ArgumentException("A frame lies outside the video.");
+                    var time=options.SnapshotTimes[n];if(!double.IsFinite(time)||time<0||(info.Duration>0&&time>info.Duration))throw new ArgumentException("A frame lies outside the video.");
                     var file=Output(directory,input,"png"," Frame "+(n+1));
-                    await RenderAsync(["-ss",Number(time),"-i",input,"-map","0:v:0","-frames:v","1","-update","1","-c:v","png"],file,null,progress,token);frames.Add(file);
+                    try{await RenderAsync(["-ss",Number(time),"-i",input,"-map","0:v:0","-frames:v","1","-update","1","-c:v","png"],file,null,progress,token);}
+                    catch(IOException)when(!File.Exists(file)||new FileInfo(file).Length==0)
+                    {
+                        // FFmpeg writes the first frame at or after -ss. Past the start of the last frame (the end, a long last
+                        // frame or an audio tail) there is none, yet the player shows the last frame there. Packet times can be
+                        // missing or early (B-frames in AVI), so decode the last second of video to the end and keep the final frame.
+                        File.Delete(file);if(!lastVideoRead){lastVideo=await LastVideoTimestampAsync(input,info.Duration,token);lastVideoRead=true;}if(lastVideo is not {} last)throw;
+                        await RenderAsync([..(last>1?new[]{"-ss",Number(last-1)}:[]),"-i",input,"-map","0:v:0","-update","1","-c:v","png"],file,null,progress,token);
+                    }frames.Add(file);
                     progress(new((double)(n+1)/options.SnapshotTimes.Length,"Saving frame "+(n+1)));
                 }
                 return frames;
@@ -366,12 +389,12 @@ public sealed class MediaEngine(string ffmpeg, string ffprobe)
     };
     private static string[] VideoEncoding(string ext,MediaOptions o)=>ext switch
     {
-        "webm"=>["-c:v","libvpx-vp9","-crf",Number(45-o.Quality*30),"-b:v","0","-c:a","libopus","-b:a",Math.Min(256,o.AudioBitrate)+"k"],
+        "webm"=>["-c:v","libvpx-vp9","-crf",Number(45-o.Quality*30),"-b:v","0","-pix_fmt","yuv420p","-c:a","libopus","-b:a",Math.Min(256,o.AudioBitrate)+"k"],
         "avi"=>["-c:v","mpeg4","-q:v",Number(25-o.Quality*22),"-c:a","libmp3lame"],
         "wmv"=>["-c:v","wmv2","-q:v",Number(25-o.Quality*22),"-c:a","wmav2"],
         _=>["-c:v","libx264","-preset","medium","-crf",Number(35-o.Quality*23),"-pix_fmt","yuv420p","-c:a","aac","-b:a",o.AudioBitrate+"k"]
     };
-    private static string Scale(MediaOptions o)=>$"scale={o.Width?.ToString(CultureInfo.InvariantCulture)??"-2"}:{o.Height?.ToString(CultureInfo.InvariantCulture)??"-2"}:force_original_aspect_ratio=decrease,pad=ceil(iw/2)*2:ceil(ih/2)*2";
+    private static string Scale(MediaOptions o)=>$"scale={o.Width?.ToString(CultureInfo.InvariantCulture)??"-2"}:{(o.Height is {} h?$"'min({h.ToString(CultureInfo.InvariantCulture)},ih)'":"-2")}:force_original_aspect_ratio=decrease,pad=ceil(iw/2)*2:ceil(ih/2)*2";
     private static string Tempo(double speed){var parts=new List<string>();while(speed>2){parts.Add("atempo=2");speed/=2;}while(speed<.5){parts.Add("atempo=0.5");speed*=2;}parts.Add("atempo="+Number(speed));return string.Join(',',parts);}
     private static MediaRange TimeRange(double start,double? end,double duration){var stop=end??duration;if(!double.IsFinite(start)||!double.IsFinite(stop)||start<0||Math.Round(stop-start,6)<.05||duration>0&&stop>duration+.001)throw new ArgumentException("Choose a valid time range.");return new(start,stop);}
     private static (int X,int Y,int Width,int Height) PixelRect(MediaRegion r,MediaInfo info){var w=info.Video?.Width??0;var h=info.Video?.Height??0;if(!new[]{r.X,r.Y,r.Width,r.Height}.All(double.IsFinite)||r.X<0||r.Y<0||r.Width<2||r.Height<2||r.X+r.Width>w||r.Y+r.Height>h)throw new ArgumentException("Choose a rectangle inside the video.");return((int)r.X,(int)r.Y,(int)r.Width,(int)r.Height);}

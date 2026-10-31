@@ -18,7 +18,9 @@ enum WebDownloadProcess {
         posix_spawn_file_actions_addclose(&actions,errors.fileHandleForReading.fileDescriptor)
         posix_spawn_file_actions_addclose(&actions,output.fileHandleForWriting.fileDescriptor)
         posix_spawn_file_actions_addclose(&actions,errors.fileHandleForWriting.fileDescriptor)
-        posix_spawnattr_setflags(&attributes,Int16(POSIX_SPAWN_SETPGROUP))
+        // Only the three standard streams reach the child: an inherited pipe of another
+        // run would otherwise stay open (no EOF) until this download ends.
+        posix_spawnattr_setflags(&attributes,Int16(POSIX_SPAWN_SETPGROUP|POSIX_SPAWN_CLOEXEC_DEFAULT))
         posix_spawnattr_setpgroup(&attributes,0)
         let args=([executable.path]+arguments).map{strdup($0)}+[nil]
         let environment=ProcessInfo.processInfo.environment.map{strdup("\($0.key)=\($0.value)")}+[nil]
@@ -58,7 +60,10 @@ enum WebDownloadProcess {
         try token.check()
         if timedOut { throw NashiError.failed("The site took too long to respond. Try the link again.") }
         if capture.overflow { throw NashiError.failed("The site returned too much metadata. Try an individual media link.") }
-        guard waitStatus==0 else { throw NashiError.failed(WebDownloadEngine.friendlyError(capture.errorText)) }
+        guard waitStatus==0 else {
+            let diagnostic=capture.errorText
+            throw WebDownloadFailure(message:WebDownloadEngine.friendlyError(diagnostic),details:WebDownloadEngine.diagnosticDetails(diagnostic))
+        }
         return capture.output
     }
 

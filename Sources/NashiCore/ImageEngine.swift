@@ -15,14 +15,22 @@ public enum ImageEngine {
     public static func load(_ url: URL) throws -> CGImage {
         if let source=CGImageSourceCreateWithURL(url as CFURL,[kCGImageSourceShouldCache:false] as CFDictionary) {
             try validateSourceDimensions(source)
-            if let image=CGImageSourceCreateThumbnailAtIndex(source,0,[kCGImageSourceCreateThumbnailFromImageAlways:true,kCGImageSourceCreateThumbnailWithTransform:true,kCGImageSourceThumbnailMaxPixelSize:maximumImageSide] as CFDictionary) {
+            // An ImageIO transform can resample non-square DPI images; apply only the EXIF rotation.
+            let properties=CGImageSourceCopyPropertiesAtIndex(source,0,nil) as? [CFString:Any]
+            let squarePixels=(properties?[kCGImagePropertyDPIWidth] as? Double) == (properties?[kCGImagePropertyDPIHeight] as? Double)
+            if let image=CGImageSourceCreateThumbnailAtIndex(source,0,[kCGImageSourceCreateThumbnailFromImageAlways:true,kCGImageSourceCreateThumbnailWithTransform:squarePixels,kCGImageSourceThumbnailMaxPixelSize:maximumImageSide] as CFDictionary) {
                 try validateDimensions(image.width,height:image.height)
-                return image
+                let orientation=(properties?[kCGImagePropertyOrientation] as? NSNumber)?.int32Value ?? 1
+                if squarePixels || !(2...8).contains(orientation) { return image }
+                let oriented=CIImage(cgImage:image).oriented(forExifOrientation:orientation)
+                guard let result=imageContext.createCGImage(oriented,from:oriented.extent) else { throw NashiError.failed("Could not orient image.") }
+                try validateDimensions(result.width,height:result.height)
+                return result
             }
-            if let image=NSImage(contentsOf:url),let cg=image.cgImage(forProposedRect:nil,context:nil,hints:nil) {
-                try validateDimensions(cg.width,height:cg.height)
-                return cg
-            }
+        }
+        if let image=NSImage(contentsOf:url),let cg=image.cgImage(forProposedRect:nil,context:nil,hints:nil) {
+            try validateDimensions(cg.width,height:cg.height)
+            return cg
         }
         // FFmpeg handles additional decoders (including animated inputs' first frame).
         return try decodeWithFFmpeg(url,maxPixelSize:maximumImageSide)
@@ -93,6 +101,8 @@ public enum ImageEngine {
     }
 
     public static func write(_ image: CGImage, to url: URL, quality: Double = 0.8, metadata: CFDictionary? = nil, token: CancellationToken = .init()) throws {
+        // Both encoder paths take the same 0.01...1 range; FFmpeg's Int conversion traps on huge values.
+        let quality=max(0.01,min(1,quality))
         let ext=url.pathExtension.lowercased()
         let type: String
         switch ext {
@@ -108,7 +118,7 @@ public enum ImageEngine {
         }
         if (CGImageDestinationCopyTypeIdentifiers() as! [String]).contains(type),let destination=CGImageDestinationCreateWithURL(url as CFURL,type as CFString,1,nil) {
             var properties = (metadata as? [CFString:Any]) ?? [:]
-            properties[kCGImageDestinationLossyCompressionQuality] = max(0.01,min(1,quality))
+            properties[kCGImageDestinationLossyCompressionQuality] = quality
             properties[kCGImagePropertyOrientation] = 1
             CGImageDestinationAddImage(destination,image,properties as CFDictionary)
             guard CGImageDestinationFinalize(destination) else { throw NashiError.failed("Could not write \(url.lastPathComponent)") }
@@ -227,7 +237,9 @@ public enum ImageEngine {
         if a.noiseReduction > 0 { ci = ci.applyingFilter("CINoiseReduction", parameters: ["inputNoiseLevel": min(1,a.noiseReduction) * 0.1, "inputSharpness": 0]) }
         if a.exposure != 0 { ci = ci.applyingFilter("CIExposureAdjust", parameters: [kCIInputEVKey: min(10,max(-10,a.exposure))]) }
         if a.temperature != 0 || a.tint != 0 {
-            ci = ci.applyingFilter("CITemperatureAndTint", parameters: ["inputNeutral": CIVector(x:6500,y:0), "inputTargetNeutral": CIVector(x:6500 + max(-1,min(1,a.temperature)) * 3000, y:max(-1,min(1,a.tint)) * 100)])
+            // A lower target neutral warms and a negative target tint adds magenta.
+            // Positive values warm and add magenta, matching the Windows editor.
+            ci = ci.applyingFilter("CITemperatureAndTint", parameters: ["inputNeutral": CIVector(x:6500,y:0), "inputTargetNeutral": CIVector(x:6500 - max(-1,min(1,a.temperature)) * 3000, y:-max(-1,min(1,a.tint)) * 100)])
         }
         ci=ci.applyingFilter("CIColorControls",parameters:[kCIInputBrightnessKey:options.brightness+a.brightness,kCIInputContrastKey:max(0,options.contrast*a.contrast),kCIInputSaturationKey:max(0,options.saturation*a.saturation)])
         if a.highlights != 0 || a.shadows != 0 || a.whites != 0 || a.blacks != 0 {
@@ -433,7 +445,10 @@ public enum ImageEngine {
                 let filtered:CIImage
                 if settings.style == .blur { filtered=original.clampedToExtent().applyingFilter("CIGaussianBlur",parameters:[kCIInputRadiusKey:max(1,settings.blurRadius)]).cropped(to:bounds) }
                 else { filtered=original.clampedToExtent().applyingFilter("CIPixellate",parameters:[kCIInputScaleKey:max(2,settings.pixelSize),kCIInputCenterKey:CIVector(x:bounds.midX,y:bounds.midY)]).cropped(to:bounds) }
-                guard let cg=imageContext.createCGImage(filtered,from:bounds) else { throw NashiError.failed("Could not render the redaction.") };ctx.draw(cg,in:target)
+                guard let cg=imageContext.createCGImage(filtered,from:bounds) else { throw NashiError.failed("Could not render the redaction.") }
+                // Replace the area. Drawing over it would let the original show
+                // through every transparent or translucent filtered pixel.
+                ctx.saveGState();ctx.setBlendMode(.copy);ctx.draw(cg,in:target);ctx.restoreGState()
             }
         }
         guard let result=ctx.makeImage() else { throw NashiError.failed("Could not redact image.") };return result
@@ -526,6 +541,8 @@ public enum ImageEngine {
         }
         let images=try inputs.map(load), columns=max(1,min(inputs.count,options.collageColumns)),rows=(inputs.count+columns-1)/columns
         let cellWidth=options.width ?? 600,cellHeight=options.height ?? 600,gap=max(0,options.padding)
+        // Bound each term first so the canvas size cannot overflow before canvas() rejects it.
+        guard (1...32000).contains(cellWidth),(1...32000).contains(cellHeight),gap<=32000 else { throw NashiError.invalidInput("Collage dimensions must be between 1 and 32,000 pixels.") }
         let width=columns*cellWidth+(columns+1)*gap,height=rows*cellHeight+(rows+1)*gap
         let ctx=try canvas(width,height);ctx.setFillColor(try validatedColor(options.backgroundColor));ctx.fill(CGRect(x:0,y:0,width:width,height:height))
         for (index,image) in images.enumerated() {

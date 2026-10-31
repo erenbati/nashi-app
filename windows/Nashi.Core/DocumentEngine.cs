@@ -36,7 +36,13 @@ public static partial class DocumentEngine
                 using var result=new PdfDocument();for(var n=0;n<pages.Length;n++){var page=pages[n];var added=result.AddPage(source.Pages[page-1]);added.Rotate=(added.Rotate+(pageRotations is not null?pageRotations[n]:rotations?.GetValueOrDefault(page)??0))%360;}
                 var output=SafePaths.Unique(tx.StagingDirectory,Path.GetFileNameWithoutExtension(input)+" Organized.pdf");result.Save(output);if(uniformWidth&&tool=="organizePDF")UniformWidths(output,token);outputs.Add(output);
             }
-            else if(tool is "compress" or "removeMetadata")
+            else if(tool=="compress")
+            {
+                // Compression keeps the document properties, as on macOS; only metadata cleanup clears them.
+                using var result=new PdfDocument();foreach(var page in source.Pages)result.AddPage(page);result.Options.CompressContentStreams=true;result.Info.Title=source.Info.Title;result.Info.Author=source.Info.Author;result.Info.Subject=source.Info.Subject;result.Info.Keywords=source.Info.Keywords;result.Info.Creator=source.Info.Creator;
+                var output=SafePaths.Unique(tx.StagingDirectory,Path.GetFileNameWithoutExtension(input)+" Compressed.pdf");result.Save(output);outputs.Add(output);
+            }
+            else if(tool=="removeMetadata")
             {
                 using var result=new PdfDocument();foreach(var page in source.Pages)result.AddPage(page);result.Options.CompressContentStreams=true;result.Info.Title="";result.Info.Author="";result.Info.Subject="";result.Info.Keywords="";
                 var output=SafePaths.Unique(tx.StagingDirectory,Path.GetFileNameWithoutExtension(input)+(tool=="compress"?" Compressed.pdf":" Metadata.pdf"));result.Save(output);outputs.Add(output);

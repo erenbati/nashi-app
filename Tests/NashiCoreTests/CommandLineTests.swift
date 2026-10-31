@@ -58,4 +58,29 @@ final class CommandLineTests:XCTestCase {
             XCTAssertNotEqual(NashiCommandLine.run(arguments:["nashi-cli","inspect",root.appendingPathComponent(name).path]),0,name)
         }
     }
+    func testRelativeOutputDirectoryWithColonIsAPath() throws {
+        let root=try OutputFiles.temporaryDirectory();defer{try? FileManager.default.removeItem(at:root)}
+        let files=FileManager.default,previous=files.currentDirectoryPath
+        XCTAssertTrue(files.changeCurrentDirectoryPath(root.path));defer{_=files.changeCurrentDirectoryPath(previous)}
+        try Data("1\n00:00:00,125 --> 00:00:01,250\nHi\n".utf8).write(to:root.appendingPathComponent("clip.srt"))
+        // Finder shows ':' in a folder name as '/', so "Q3/2024" is stored as "Q3:2024".
+        try files.createDirectory(at:root.appendingPathComponent("Q3:2024"),withIntermediateDirectories:true)
+        XCTAssertEqual(NashiCommandLine.run(arguments:["nashi-cli","convert","vtt","clip.srt","--options","{\"outputDirectory\":\"Q3:2024\"}"]),0)
+        XCTAssertEqual(try files.contentsOfDirectory(atPath:root.appendingPathComponent("Q3:2024").path),["clip.vtt"])
+    }
+    func testUsageGoesToStandardErrorAndListsEveryCommand() throws {
+        let root=try OutputFiles.temporaryDirectory();defer{try? FileManager.default.removeItem(at:root)}
+        let out=root.appendingPathComponent("out"),err=root.appendingPathComponent("err")
+        fflush(stdout);fflush(stderr)
+        let savedOut=dup(1),savedErr=dup(2)
+        let o=open(out.path,O_CREAT|O_WRONLY|O_TRUNC,0o600),e=open(err.path,O_CREAT|O_WRONLY|O_TRUNC,0o600)
+        dup2(o,1);dup2(e,2);close(o);close(e)
+        let code=NashiCommandLine.run(arguments:["nashi-cli"])
+        fflush(stdout);fflush(stderr)
+        dup2(savedOut,1);dup2(savedErr,2);close(savedOut);close(savedErr)
+        XCTAssertEqual(code,64)
+        XCTAssertEqual(try Data(contentsOf:out),Data())
+        let usage=try String(contentsOf:err,encoding:.utf8)
+        for word in ["convert FORMAT","tool TOOL_ID","inspect FILE","catalog","dependencies","--options JSON","--json"] { XCTAssertTrue(usage.contains(word),word) }
+    }
 }
