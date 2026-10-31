@@ -575,9 +575,14 @@ struct ToolEditor:View {
             if category == .image {
                 let cg:CGImage
                 if tool == .createCollage {
+                    let sources=inputs
                     let thumbnails=try await Task.detached {
                         var cache:[URL:CGImage]=[:]
-                        for source in inputs where cache[source] == nil { cache[source]=try ImageEngine.loadThumbnail(source,maxPixelSize:1_024) }
+                        for source in sources where cache[source] == nil {
+                            try token.check()
+                            cache[source]=try ImageEngine.loadThumbnail(source,maxPixelSize:1_024)
+                        }
+                        try token.check()
                         return cache
                     }.value
                     collagePreviewImages=thumbnails

@@ -54,7 +54,7 @@ public enum ImageEngine {
     private static func decodeWithFFmpeg(_ url:URL,maxPixelSize:Int) throws -> CGImage {
         let temp=try OutputFiles.temporaryDirectory();defer { try? FileManager.default.removeItem(at:temp) }
         let png=temp.appendingPathComponent("decoded.png")
-        let scale="scale=w='min(\(maxPixelSize),min(iw,sqrt(100000000*iw/ih)))':h='min(\(maxPixelSize),min(ih,sqrt(100000000*ih/iw)))'"
+        let scale="scale=w='min(\(maxPixelSize),min(iw,sqrt(100000000*iw/ih)))':h='min(\(maxPixelSize),min(ih,sqrt(100000000*ih/iw)))':force_original_aspect_ratio=decrease"
         try ProcessRunner.run(Dependencies.executable("ffmpeg"),["-v","error","-max_alloc","536870912","-i",url.path,"-frames:v","1","-vf",scale,png.path])
         guard let source=CGImageSourceCreateWithURL(png as CFURL,nil),let image=CGImageSourceCreateImageAtIndex(source,0,nil) else {
             throw NashiError.invalidInput("This image could not be decoded.")
