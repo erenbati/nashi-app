@@ -29,7 +29,7 @@ public enum ImageEngine {
     }
 
     /// Loads a bounded display-sized image for editors that only need a preview.
-    public static func loadThumbnail(_ url:URL,maxPixelSize:Int=previewImageSide) throws -> CGImage {
+    public static func loadThumbnail(_ url:URL,maxPixelSize:Int=2_048) throws -> CGImage {
         guard maxPixelSize>0,maxPixelSize<=previewImageSide else {
             throw NashiError.invalidInput("This image could not be decoded.")
         }
