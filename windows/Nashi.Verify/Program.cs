@@ -5,6 +5,8 @@ if(Environment.GetEnvironmentVariable("NASHI_VERIFY_DOWNLOAD_TOOLS")=="1")
 {
     var toolPath=Environment.GetEnvironmentVariable("NASHI_VERIFY_TOOLS_DIRECTORY")??throw new Exception("Set a test tool directory.");
     var tools=new Toolchain(toolPath);if(!tools.Ready)await tools.InstallAsync();
+    // Starting each download proves it is this platform's binary and that it kept its executable bit.
+    await ProcessRunner.RunAsync(tools.Executable("yt-dlp"),["--version"]);await ProcessRunner.RunAsync(tools.Executable("deno"),["--version"]);
     Environment.SetEnvironmentVariable("NASHI_VERIFY_FFMPEG",tools.Executable("ffmpeg"));Environment.SetEnvironmentVariable("NASHI_VERIFY_FFPROBE",tools.Executable("ffprobe"));
 }
 var checks = 0;
@@ -63,6 +65,9 @@ try
     library.SetWindowManagement(false);
     var reopened=new LibraryStore(libraryDirectory);Check(reopened.Entries.Single().Paths.Single()==unicodeFile&&reopened.Appearance=="dark"&&!reopened.WindowManagementEnabled,"Library restart lost paths or settings");
     Check(reopened.Search("Türkçe").Count()==1&&reopened.Search("PASTED").Count()==1&&reopened.Search("absent").Count()==0,"Library search failed");
+    var namedLibrary=new LibraryStore(Path.Combine(root,"Named library"));var izmir=Path.Combine(root,"İzmir Café.txt");File.WriteAllText(izmir,"x");namedLibrary.Record("Resize Image",[izmir]);
+    Check(new[]{"izmir","İZMİR","cafe"," İzmir "}.All(q=>namedLibrary.Search(q).Count()==1&&namedLibrary.Search(q,"tr").Count()==1)&&namedLibrary.Search("görseli boyut","tr").Count()==1&&namedLibrary.Search("Ankara","tr").Count()==0,"Library search missed a file name that differs only in case or accents, as macOS finds it");
+    File.Delete(izmir);
     File.Delete(unicodeFile);Check(reopened.Entries.Single().AvailablePaths.Length==0,"Missing Library file was available");
     for(var i=0;i<55;i++)library.Record("ZIP "+i,[Path.Combine(root,"Output.txt")]);Check(library.Entries.Count==LibraryStore.Limit,"Library retention limit failed");
     Check(new LibraryStore(libraryDirectory).Entries.Count==LibraryStore.Limit,"Persisted Library limit failed");
@@ -84,6 +89,13 @@ try
     using(var malicious=System.IO.Compression.ZipFile.Open(unsafeZip,System.IO.Compression.ZipArchiveMode.Create)){using var entry=malicious.CreateEntry("../outside.txt").Open();entry.WriteByte(1);}
     try{DocumentEngine.Unzip(unsafeZip,root);throw new Exception("Traversal archive succeeded");}catch(InvalidDataException){checks++;}
     Check(!File.Exists(Path.Combine(Path.GetDirectoryName(root)!,"outside.txt")),"Archive wrote outside destination");
+    var datedZip=Path.Combine(root,"Dated.zip");var dated=new DateTime(2020,1,2,3,4,6);
+    using(var archive=System.IO.Compression.ZipFile.Open(datedZip,System.IO.Compression.ZipArchiveMode.Create)){var entry=archive.CreateEntry("Dated.txt");entry.LastWriteTime=dated;using var stream=entry.Open();stream.WriteByte(1);}
+    Check(File.GetLastWriteTime(Path.Combine(ArchiveEngine.Extract(datedZip,root)[0],"Dated.txt"))==dated,"Extracted files lost their modification dates");
+    var rarFixtures=AppContext.BaseDirectory;while(!Directory.Exists(Path.Combine(rarFixtures,"Reference","archive-fixtures")))rarFixtures=Path.GetDirectoryName(Path.TrimEndingDirectorySeparator(rarFixtures))??throw new DirectoryNotFoundException("Reference/archive-fixtures");rarFixtures=Path.Combine(rarFixtures,"Reference","archive-fixtures");
+    Check(File.GetLastWriteTime(Path.Combine(ArchiveEngine.Extract(Path.Combine(rarFixtures,"test_read_format_rar.rar"),root)[0],"test.txt"))==new DateTime(2011,6,26,14,53,47)&&File.GetLastWriteTimeUtc(Path.Combine(ArchiveEngine.Extract(Path.Combine(rarFixtures,"test_read_format_rar5_stored.rar"),root)[0],"helloworld.txt"))==new DateTime(2018,9,26,4,43,42,DateTimeKind.Utc),"Extracted RAR files lost their modification dates");
+    using(var converted=System.IO.Compression.ZipFile.OpenRead(ArchiveEngine.Convert(datedZip,"zip",root)[0]))Check(converted.GetEntry("Dated.txt")!.LastWriteTime.DateTime==dated,"Converted ZIP lost its file dates");
+    using(var converted=File.OpenRead(ArchiveEngine.Convert(datedZip,"tar",root)[0]))Check(new System.Formats.Tar.TarReader(converted).GetNextEntry()!.ModificationTime.LocalDateTime==dated,"Converted TAR lost its file dates");
     var fake=Path.Combine(root,"fake.zip");File.WriteAllText(fake,"untrusted");
     var update=new WindowsUpdate("99.0.0.0","https://github.com/orkunisitmak/nashi-app/releases/download/test/Nashi.zip",new FileInfo(fake).Length,Convert.ToBase64String(new byte[64]));
     try{await PublicUpdates.VerifyAsync(fake,update);throw new Exception("Unsigned update accepted");}catch(InvalidDataException){checks++;}
@@ -103,6 +115,14 @@ if(Environment.GetEnvironmentVariable("NASHI_VERIFY_FFMPEG") is {} encoder && En
         await ProcessRunner.RunAsync(encoder,["-v","error","-f","lavfi","-i","testsrc2=size=128x72:rate=12:duration=2","-f","lavfi","-i","sine=duration=2:sample_rate=48000","-c:v","libx264","-c:a","aac",source]);
         var original=System.Security.Cryptography.SHA256.HashData(await File.ReadAllBytesAsync(source));
         var engine=new MediaEngine(encoder,probe);var progress=new List<OperationProgress>();
+        var odd=Path.Combine(directory,"Odd dimensions.mkv");await ProcessRunner.RunAsync(encoder,["-v","error","-f","lavfi","-i","testsrc=size=97x65:duration=0.2","-c:v","ffv1",odd]);
+        var oddInfo=await engine.InspectAsync(odd);Check(oddInfo.Video is {Width:97,Height:65},"Odd-dimension fixture was rounded before conversion");
+        foreach(var format in new[]{"mp4","mov","mkv","m4v"})
+        {
+            var padded=await engine.ConvertAsync([odd],format,directory,new());var paddedInfo=await engine.InspectAsync(padded[0]);
+            Check(paddedInfo.Video is {Width:98,Height:66}&&paddedInfo.Duration>0,"Odd video dimensions could not convert to "+format);
+        }
+        Check((await engine.InspectAsync(odd)).Video is {Width:97,Height:65},"Odd-dimension conversion changed the source");
         var reporter=new InlineProgress(p=>progress.Add(p));
         Check(Math.Abs((await engine.InspectAsync(source)).Video!.FrameRate-12)<.001,"Frame-by-frame preview lost actual source FPS");
         var trimmed=await engine.ToolAsync("trimVideo",[source],directory,new(){Start=.25,End=1.25},reporter);
@@ -119,6 +139,7 @@ if(Environment.GetEnvironmentVariable("NASHI_VERIFY_FFMPEG") is {} encoder && En
         var muted=await engine.ToolAsync("muteVideo",[source],directory,new());Check(!(await engine.InspectAsync(muted[0])).HasAudio,"Mute retained audio");
         var speed=await engine.ToolAsync("changeVideoSpeed",[source],directory,new(){Speed=2});Check((await engine.InspectAsync(speed[0])).Duration<1.3,"Speed duration is wrong");
         var crop=await engine.ToolAsync("cropVideo",[source],directory,new(){Regions=[new(0,0,64,40)]});var cropped=await engine.InspectAsync(crop[0]);Check(cropped.Video?.Width==64&&cropped.Video.Height==40,"Crop dimensions wrong");
+        var capped=await engine.InspectAsync((await engine.ConvertAsync([source],"mp4",directory,new(){Height=720}))[0]);var shrunk=await engine.InspectAsync((await engine.ConvertAsync([source],"mp4",directory,new(){Height=48}))[0]);Check(capped.Video?.Width==128&&capped.Video.Height==72&&shrunk.Video?.Height==48,"Maximum video height upscaled a smaller video");
         var clips=await engine.ToolAsync("splitVideo",[source],directory,new(){EqualClips=2});Check(clips.Count==2,"Split count wrong");
         foreach(var clip in clips)Check((await engine.InspectAsync(clip)).Duration<1.25,"Split interval wrong");
         var sourceDuration=(await engine.InspectAsync(source)).Duration;var tail=await engine.ToolAsync("splitVideo",[source],directory,new(){SplitInterval=sourceDuration/2-.01});Check(tail.Count==2,"A sub-0.05 s interval remainder failed the split instead of joining the last clip");
@@ -128,6 +149,19 @@ if(Environment.GetEnvironmentVariable("NASHI_VERIFY_FFMPEG") is {} encoder && En
         var wav=await engine.ConvertAsync([source],"wav",directory,new());var normalizedWav=await engine.ToolAsync("normalizeAudio",wav,directory,new());
         var sourceRate=(await engine.InspectAsync(wav[0])).Audio?.SampleRate??0;var normalizedRate=(await engine.InspectAsync(normalizedWav[0])).Audio?.SampleRate??0;Check(sourceRate>0&&normalizedRate==sourceRate,$"Normalization changed the sample rate ({sourceRate} Hz → {normalizedRate} Hz)");
         var snapshots=await engine.ToolAsync("videoSnapshots",[source],directory,new(){SnapshotTimes=[0,1]});Check(snapshots.Count==2&&snapshots.All(File.Exists),"Snapshot output missing");
+        // The player shows the last frame from its start to the end, including an audio tail after the picture.
+        var pictureEndsEarly=Path.Combine(directory,"Picture ends early.mp4");await ProcessRunner.RunAsync(encoder,["-v","error","-f","lavfi","-i","testsrc=size=128x96:rate=25:duration=2","-f","lavfi","-i","sine=duration=2.5:sample_rate=48000","-c:v","libx264","-pix_fmt","yuv420p","-c:a","aac",pictureEndsEarly]);
+        // Matroska stores no video stream duration, so its end is found by decoding.
+        var pictureEndsEarlyMkv=Path.ChangeExtension(pictureEndsEarly,"mkv");await ProcessRunner.RunAsync(encoder,["-v","error","-i",pictureEndsEarly,"-c","copy",pictureEndsEarlyMkv]);
+        // MPEG-4 with B-frames in AVI leaves the last packets without a presentation time.
+        var pictureEndsEarlyAvi=Path.ChangeExtension(pictureEndsEarly,"avi");await ProcessRunner.RunAsync(encoder,["-v","error","-f","lavfi","-i","testsrc=size=128x96:rate=25:duration=2","-f","lavfi","-i","sine=duration=2.5:sample_rate=48000","-c:v","mpeg4","-bf","2","-c:a","libmp3lame",pictureEndsEarlyAvi]);
+        foreach(var clip in new[]{pictureEndsEarly,pictureEndsEarlyMkv,pictureEndsEarlyAvi})
+        {
+            var middle=clip+" middle.png";var last=clip+" last.png";await ProcessRunner.RunAsync(encoder,["-v","error","-ss","1","-i",clip,"-map","0:v:0","-frames:v","1","-c:v","png",middle]);await ProcessRunner.RunAsync(encoder,["-v","error","-i",clip,"-map","0:v:0","-update","1","-c:v","png",last]);
+            var endFrames=await engine.ToolAsync("videoSnapshots",[clip],directory,new(){SnapshotTimes=[..(clip==pictureEndsEarlyAvi?new[]{1,2.3}:[1,1.97,1.99,2.3]),(await engine.InspectAsync(clip)).Duration]});var lastBytes=File.ReadAllBytes(last);
+            // In AVI, FFmpeg retimes the reordered last frames slightly past 2 s, so only playheads after them are compared there.
+            Check(endFrames.Count==(clip==pictureEndsEarlyAvi?3:5)&&File.ReadAllBytes(endFrames[0]).SequenceEqual(File.ReadAllBytes(middle))&&endFrames.Skip(1).All(f=>File.ReadAllBytes(f).SequenceEqual(lastBytes))&&!lastBytes.SequenceEqual(File.ReadAllBytes(middle)),"End-of-video snapshots did not show the last frame, or a mid-video snapshot moved ("+Path.GetExtension(clip)+")");
+        }
         var bleeped=await engine.ToolAsync("redactAudio",audio,directory,new(){AudioRedactions=[new(.25,.75)]});Check((await engine.InspectAsync(bleeped[0])).HasAudio,"Bleep export failed");
         var stereo=Path.Combine(directory,"Stereo.wav");await ProcessRunner.RunAsync(encoder,["-v","error","-f","lavfi","-i","sine=duration=1:sample_rate=48000","-ac","2",stereo]);var stereoBleep=await engine.ToolAsync("redactAudio",[stereo],directory,new(){AudioRedactions=[new(.25,.75)]});
         Check((await ProcessRunner.RunAsync(probe,["-v","error","-select_streams","a:0","-show_entries","stream=channels","-of","csv=p=0",stereoBleep[0]])).Output.Trim()=="2","Audio redaction downmixed a stereo file");
@@ -145,6 +179,7 @@ if(Environment.GetEnvironmentVariable("NASHI_VERIFY_FFMPEG") is {} encoder && En
         {
             var converted=await engine.ConvertAsync([source],ext,directory,new());Check((await engine.InspectAsync(converted[0])).Video is not null,"No video in "+ext);
         }
+        var gif=Path.Combine(directory,"Animated.gif");await ProcessRunner.RunAsync(encoder,["-v","error","-f","lavfi","-i","testsrc2=size=128x72:rate=12:duration=1",gif]);var gifWebm=await engine.ConvertAsync([gif],"webm",directory,new());Check((await engine.InspectAsync(gifWebm[0])).Video?.Codec=="vp9","GIF to WebM conversion did not produce a VP9 video");
         var portrait=Path.Combine(directory,"Portrait.mp4");
         await ProcessRunner.RunAsync(encoder,["-v","error","-display_rotation:v:0","90","-i",source,"-map","0","-c","copy",portrait]);
         var portraitInfo=await engine.InspectAsync(portrait);Check(portraitInfo.Video?.Width==72&&portraitInfo.Video.Height==128,"Portrait display dimensions ignored rotation");
@@ -153,6 +188,22 @@ if(Environment.GetEnvironmentVariable("NASHI_VERIFY_FFMPEG") is {} encoder && En
         var finalHash=System.Security.Cryptography.SHA256.HashData(await File.ReadAllBytesAsync(source));
         Check(original.SequenceEqual(finalHash),"Source changed");
         Console.WriteLine(JsonSerializer.Serialize(new{passed=checks,scope="Engine safety plus real FFmpeg conversion, trim, mute, speed, crop, split, join, normalize, snapshots and redaction; Windows UI not claimed"}));
+    }
+    finally{Directory.Delete(directory,true);}
+}
+
+// Optional ExifTool checks install the pinned upstream package beside the test media tools.
+if(Environment.GetEnvironmentVariable("NASHI_VERIFY_DOWNLOAD_TOOLS")=="1"&&Environment.GetEnvironmentVariable("NASHI_VERIFY_TOOLS_DIRECTORY") is {} metadataTools)
+{
+    var metadata=new MetadataService(metadataTools.TrimEnd('/','\\')+" Metadata");await metadata.InstallAsync(null,CancellationToken.None);
+    var directory=Path.Combine(Path.GetTempPath(),"Nashi-Metadata-"+Guid.NewGuid().ToString("N"));Directory.CreateDirectory(directory);
+    try
+    {
+        var photo=Path.Combine(directory,"Fixture ' $().jpg");using(var image=new ImageMagick.MagickImage(ImageMagick.MagickColors.Gold,16,16))image.Write(photo,ImageMagick.MagickFormat.Jpeg);
+        var tagged=await metadata.WriteAsync([photo],directory,false,new Dictionary<string,string>{{"EXIF:Artist","Nashi fixture"}});
+        Check((await metadata.ReadAsync(tagged[0])).GetValueOrDefault("EXIF:Artist")=="Nashi fixture","ExifTool did not write and read back a tag");
+        Check(!(await metadata.ReadAsync(photo)).ContainsKey("EXIF:Artist"),"Metadata editing changed the original");
+        Console.WriteLine(JsonSerializer.Serialize(new{passed=checks,scope="Verified ExifTool download, tag write and read back"}));
     }
     finally{Directory.Delete(directory,true);}
 }
