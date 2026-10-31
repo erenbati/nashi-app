@@ -237,7 +237,8 @@ enum ArchiveCodec {
                 kLSQuarantineTypeKey as String: kLSQuarantineTypeOtherDownload as String,
                 kLSQuarantineTimeStampKey as String: Date()
             ]
-            try url.setResourceValues(values)
+            var mutableURL=url
+            try mutableURL.setResourceValues(values)
         }
         try quarantine(root)
         guard let enumerator=FileManager.default.enumerator(at:root,includingPropertiesForKeys:[.isDirectoryKey,.isRegularFileKey,.isSymbolicLinkKey]) else {
