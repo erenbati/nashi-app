@@ -93,13 +93,21 @@ internal static class EditorReliabilityChecks
                 check(photo.FieldForTest("Degrees").Text=="90"&&photo.FieldForTest("Width").Text=="60","Photo rotation did not recover after correcting invalid input");
                 Trace("photo first image export");photo.AcceptForTest();var turned=ImageEngine.Load(ImageEngine.Apply("editImage",[image],root,photo.ImageOptions)[0]);
                 check(turned.PixelWidth==60&&turned.PixelHeight==100,$"Rotate Right distorted the photo to {turned.PixelWidth}×{turned.PixelHeight}");
-                Children(photo).OfType<Button>().Single(b=>b.Content as string=="↶ Reset").RaiseEvent(new RoutedEventArgs(Button.ClickEvent));Trace("photo reset and 45-degree preview");photo.FieldForTest("Degrees").Text="45";Trace("45-degree field set; pumping WPF dispatcher");DesktopInput.Pump(1500);Trace("45-degree dispatcher pump returned");photo.AcceptForTest();Trace("45-degree editor options accepted");
+                Children(photo).OfType<Button>().Single(b=>b.Content as string=="↶ Reset").RaiseEvent(new RoutedEventArgs(Button.ClickEvent));Trace("photo reset and 45-degree preview");
+                // A deliberately slow real STA render must not make this smoke test read a stale preview.
+                photo.PhotoWorkerGateForTest=()=>Thread.Sleep(4000);
+                photo.FieldForTest("Degrees").Text="45";Trace("45-degree field set; pumping WPF dispatcher");
+                var previewImage=(Image)Children(photo).OfType<Canvas>().First(c=>c.Children.Count>0&&c.Children[0] is Image).Children[0];
+                var previewWait=System.Diagnostics.Stopwatch.StartNew();
+                while(previewImage.Source is not System.Windows.Media.Imaging.BitmapSource{PixelWidth:114,PixelHeight:114}
+                    &&previewWait.Elapsed<TimeSpan.FromSeconds(15))DesktopInput.Pump(100);
+                Trace("45-degree dispatcher pump returned");photo.AcceptForTest();Trace("45-degree editor options accepted");
                 Trace("photo second image export");var tilted=ImageEngine.Load(ImageEngine.Apply("editImage",[image],root,photo.ImageOptions)[0]);
                 check(photo.IsVisible&&tilted.PixelWidth==114&&tilted.PixelHeight==114,$"A 45° photo rotation crashed the preview or lost the turned corners: {tilted.PixelWidth}×{tilted.PixelHeight}");
-                var shown=(System.Windows.Media.Imaging.BitmapSource)((Image)Children(photo).OfType<Canvas>().First(c=>c.Children.Count>0&&c.Children[0] is Image).Children[0]).Source;
+                var shown=(System.Windows.Media.Imaging.BitmapSource)previewImage.Source;
                 check(shown.PixelWidth==114&&shown.PixelHeight==114,$"The 45° preview ({shown.PixelWidth}×{shown.PixelHeight}) differs from the exported photo");
             }
-            finally{Trace("photo close");photo.Close();}
+            finally{photo.PhotoWorkerGateForTest=null;Trace("photo close");photo.Close();}
             Trace("START single-image resize editor");var single=new ToolEditor(owner,"resize","Resize",image,preview:pixels);
             try
             {
