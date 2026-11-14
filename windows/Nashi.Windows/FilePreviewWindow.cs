@@ -19,7 +19,7 @@ internal sealed class FilePreviewWindow:Window
     internal string CurrentPath=>paths[index];internal bool Playing=>playing;
     internal FilePreviewWindow(Window owner,IEnumerable<string> paths,Toolchain? tools=null,OfficeRuntime? office=null)
     {
-        this.tools=tools??new Toolchain(Path.Combine(PreviewLaunch.ToolsDirectory,"v1"),Environment.GetEnvironmentVariable("PATH"));
+        this.tools=tools??PreviewLaunch.CreateMediaToolchain(Path.Combine(PreviewLaunch.ToolsDirectory,"v1"));
         this.office=office??new OfficeRuntime(PreviewLaunch.ToolsDirectory);
         this.paths=paths.Distinct(StringComparer.OrdinalIgnoreCase).ToArray();if(this.paths.Length==0)throw new ArgumentException("Choose a file to preview.");
         Owner=owner;Title="Preview · Nashi";Width=800;Height=620;MinWidth=560;MinHeight=400;WindowStartupLocation=WindowStartupLocation.CenterOwner;Theme.Attach(this);

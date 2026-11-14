@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using Nashi.Core;
 
 namespace Nashi.Windows;
 
@@ -26,4 +27,8 @@ internal static class PreviewLaunch
     // Preview installations must never touch the official app media, Office, or metadata tools.
     internal static string ToolsDirectory=>Enabled?Path.Combine(DataDirectory,"Tools"):
         Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),"Nashi","Tools");
+
+    // Only official builds may reuse user-installed tools from PATH.
+    internal static Toolchain CreateMediaToolchain(string directory)=>
+        new(directory,Enabled?null:Environment.GetEnvironmentVariable("PATH"));
 }
